@@ -1,0 +1,777 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TOEIC Community Tracker</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
+  import { getFirestore, collection, doc, setDoc, addDoc, getDocs, query, where, orderBy, onSnapshot, getDoc } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyBo2OHmY9wLkRmTIjkNuaZOKpunkSj5cCU",
+    authDomain: "toeic-community-e08b4.firebaseapp.com",
+    projectId: "toeic-community-e08b4",
+    storageBucket: "toeic-community-e08b4.firebasestorage.app",
+    messagingSenderId: "799423705039",
+    appId: "1:799423705039:web:86a1c5d3404fbb7e98ecba"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+
+  let currentUser = null;
+  let chartInstance = null;
+  let membersUnsubscribe = null;
+
+  // ---- ユーティリティ ----
+  function getMonthKey() {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+  }
+
+  function getTodayKey() {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+  }
+
+  function formatMonth(key) {
+    const [y, m] = key.split('-');
+    return `${y}年${parseInt(m)}月`;
+  }
+
+  // ---- 初期化 ----
+  window.addEventListener('DOMContentLoaded', async () => {
+    const savedId = localStorage.getItem('toeic_user_id');
+    if (savedId) {
+      const userDoc = await getDoc(doc(db, 'users', savedId));
+      if (userDoc.exists()) {
+        currentUser = { id: savedId, ...userDoc.data() };
+        showApp();
+        return;
+      }
+    }
+    showRegister();
+  });
+
+  // ---- 登録 ----
+  function showRegister() {
+    document.getElementById('register-screen').style.display = 'flex';
+    document.getElementById('app-screen').style.display = 'none';
+  }
+
+  function showApp() {
+    document.getElementById('register-screen').style.display = 'none';
+    document.getElementById('app-screen').style.display = 'block';
+    document.getElementById('current-user-name').textContent = currentUser.name;
+    loadTab('ranking');
+  }
+
+  window.register = async function() {
+    const name = document.getElementById('reg-name').value.trim();
+    const target = parseInt(document.getElementById('reg-target').value);
+    if (!name) { alert('名前を入力してください'); return; }
+    if (!target || target < 10 || target > 990) { alert('目標スコアを入力してください（10〜990）'); return; }
+
+    const btn = document.getElementById('reg-btn');
+    btn.disabled = true;
+    btn.textContent = '登録中...';
+
+    try {
+      const userId = 'user_' + Date.now() + '_' + Math.random().toString(36).slice(2,7);
+      await setDoc(doc(db, 'users', userId), { name, targetScore: target, createdAt: new Date().toISOString() });
+      localStorage.setItem('toeic_user_id', userId);
+      currentUser = { id: userId, name, targetScore: target };
+      showApp();
+    } catch(e) {
+      alert('登録に失敗しました: ' + e.message);
+      btn.disabled = false;
+      btn.textContent = '参加する';
+    }
+  };
+
+  // ---- タブ切り替え ----
+  window.loadTab = function(tab) {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelector(`[data-tab="${tab}"]`).classList.add('active');
+    document.querySelectorAll('.tab-content').forEach(c => c.style.display = 'none');
+    document.getElementById(`tab-${tab}`).style.display = 'block';
+
+    if (membersUnsubscribe) { membersUnsubscribe(); membersUnsubscribe = null; }
+
+    if (tab === 'ranking') loadRanking();
+    if (tab === 'members') loadMembers();
+    if (tab === 'input') setupInput();
+    if (tab === 'mypage') loadMyPage();
+  };
+
+  // ---- ランキング ----
+  async function loadRanking() {
+    const el = document.getElementById('ranking-list');
+    el.innerHTML = '<div class="loading">読み込み中...</div>';
+
+    const monthKey = getMonthKey();
+    const recSnap = await getDocs(query(collection(db, 'records'), where('monthKey','==',monthKey)));
+    const userSnap = await getDocs(collection(db, 'users'));
+    const users = {};
+    userSnap.forEach(d => { users[d.id] = d.data(); });
+
+    const totals = {};
+    recSnap.forEach(d => {
+      const r = d.data();
+      if (!totals[r.userId]) totals[r.userId] = 0;
+      totals[r.userId] += r.studyHours || 0;
+    });
+
+    const sorted = Object.entries(totals).sort((a,b) => b[1]-a[1]);
+
+    if (sorted.length === 0) {
+      el.innerHTML = '<div class="empty-state">まだデータがありません。<br>「入力」タブから記録を始めましょう！</div>';
+      return;
+    }
+
+    const max = sorted[0][1] || 1;
+    el.innerHTML = sorted.map(([uid, hours], i) => {
+      const u = users[uid] || { name: '不明' };
+      const pct = (hours / max * 100).toFixed(1);
+      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i+1}`;
+      const isMe = uid === currentUser?.id;
+      return `
+        <div class="rank-item ${isMe ? 'is-me' : ''}">
+          <div class="rank-medal">${medal}</div>
+          <div class="rank-info">
+            <div class="rank-name">${u.name}${isMe ? ' <span class="me-badge">あなた</span>' : ''}</div>
+            <div class="rank-bar-wrap">
+              <div class="rank-bar" style="width:${pct}%"></div>
+            </div>
+          </div>
+          <div class="rank-hours">${hours.toFixed(1)}<span class="unit">h</span></div>
+        </div>`;
+    }).join('');
+  }
+
+  // ---- メンバー一覧 ----
+  async function loadMembers() {
+    const el = document.getElementById('members-list');
+    el.innerHTML = '<div class="loading">読み込み中...</div>';
+
+    const monthKey = getMonthKey();
+    const [userSnap, recSnap] = await Promise.all([
+      getDocs(collection(db, 'users')),
+      getDocs(query(collection(db, 'records'), where('monthKey','==',monthKey), orderBy('date','desc')))
+    ]);
+
+    const users = {};
+    userSnap.forEach(d => { users[d.id] = { id: d.id, ...d.data() }; });
+
+    const latestScore = {};
+    const monthHours = {};
+    recSnap.forEach(d => {
+      const r = d.data();
+      if (!latestScore[r.userId]) latestScore[r.userId] = r.score;
+      monthHours[r.userId] = (monthHours[r.userId] || 0) + (r.studyHours || 0);
+    });
+
+    const members = Object.values(users);
+    if (members.length === 0) {
+      el.innerHTML = '<div class="empty-state">メンバーがいません</div>';
+      return;
+    }
+
+    el.innerHTML = `
+      <div class="member-table">
+        <div class="member-header">
+          <span>名前</span><span>現在スコア</span><span>目標スコア</span><span>今月の学習</span>
+        </div>
+        ${members.map(u => {
+          const score = latestScore[u.id];
+          const hours = monthHours[u.id] || 0;
+          const isMe = u.id === currentUser?.id;
+          const progress = score && u.targetScore ? Math.min(100, (score / u.targetScore * 100)).toFixed(0) : null;
+          return `
+            <div class="member-row ${isMe ? 'is-me' : ''}">
+              <span class="member-name">${u.name}${isMe ? ' <span class="me-badge">あなた</span>' : ''}</span>
+              <span class="member-score">${score ? score : '—'}</span>
+              <span class="member-target">${u.targetScore}
+                ${progress ? `<span class="progress-pill">${progress}%</span>` : ''}
+              </span>
+              <span class="member-hours">${hours.toFixed(1)}h</span>
+            </div>`;
+        }).join('')}
+      </div>`;
+  }
+
+  // ---- 入力 ----
+  async function setupInput() {
+    const todayKey = getTodayKey();
+    const existing = await getDocs(query(
+      collection(db, 'records'),
+      where('userId','==',currentUser.id),
+      where('date','==',todayKey)
+    ));
+    if (!existing.empty) {
+      const data = existing.docs[0].data();
+      document.getElementById('input-score').value = data.score || '';
+      document.getElementById('input-hours').value = data.studyHours || '';
+      document.getElementById('input-note').textContent = '今日はすでに記録済みです。上書きして送信できます。';
+    } else {
+      document.getElementById('input-note').textContent = '';
+    }
+    document.getElementById('input-date').textContent = todayKey;
+  }
+
+  window.submitRecord = async function() {
+    const score = parseInt(document.getElementById('input-score').value);
+    const hours = parseFloat(document.getElementById('input-hours').value);
+    if (!score || score < 10 || score > 990) { alert('スコアを正しく入力してください（10〜990）'); return; }
+    if (isNaN(hours) || hours < 0 || hours > 24) { alert('勉強時間を正しく入力してください（0〜24）'); return; }
+
+    const btn = document.getElementById('submit-btn');
+    btn.disabled = true;
+    btn.textContent = '送信中...';
+
+    try {
+      const todayKey = getTodayKey();
+      const monthKey = getMonthKey();
+      const existing = await getDocs(query(
+        collection(db, 'records'),
+        where('userId','==',currentUser.id),
+        where('date','==',todayKey)
+      ));
+
+      const data = {
+        userId: currentUser.id,
+        userName: currentUser.name,
+        date: todayKey,
+        monthKey,
+        score,
+        studyHours: hours,
+        updatedAt: new Date().toISOString()
+      };
+
+      if (!existing.empty) {
+        await setDoc(doc(db, 'records', existing.docs[0].id), data);
+      } else {
+        await addDoc(collection(db, 'records'), data);
+      }
+
+      document.getElementById('input-success').style.display = 'block';
+      setTimeout(() => {
+        document.getElementById('input-success').style.display = 'none';
+        loadTab('ranking');
+      }, 1800);
+    } catch(e) {
+      alert('送信に失敗しました: ' + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '記録する';
+    }
+  };
+
+  // ---- マイページ ----
+  async function loadMyPage() {
+    if (!currentUser) return;
+    document.getElementById('my-name').textContent = currentUser.name;
+    document.getElementById('my-target').textContent = currentUser.targetScore;
+
+    const recSnap = await getDocs(query(
+      collection(db, 'records'),
+      where('userId','==',currentUser.id),
+      orderBy('date','asc')
+    ));
+
+    const records = [];
+    recSnap.forEach(d => records.push(d.data()));
+
+    if (records.length === 0) {
+      document.getElementById('my-chart-wrap').innerHTML = '<div class="empty-state">まだ記録がありません</div>';
+      document.getElementById('my-stats').innerHTML = '';
+      return;
+    }
+
+    const latest = records[records.length - 1];
+    const first = records[0];
+    const diff = latest.score - first.score;
+    const monthKey = getMonthKey();
+    const monthRecords = records.filter(r => r.monthKey === monthKey);
+    const monthHours = monthRecords.reduce((s,r) => s + (r.studyHours||0), 0);
+
+    document.getElementById('my-stats').innerHTML = `
+      <div class="stat-card"><div class="stat-val">${latest.score}</div><div class="stat-label">最新スコア</div></div>
+      <div class="stat-card"><div class="stat-val ${diff>=0?'pos':'neg'}">${diff>=0?'+':''}${diff}</div><div class="stat-label">初回からの変化</div></div>
+      <div class="stat-card"><div class="stat-val">${monthHours.toFixed(1)}h</div><div class="stat-label">今月の学習時間</div></div>
+      <div class="stat-card"><div class="stat-val">${records.length}</div><div class="stat-label">記録日数</div></div>
+    `;
+
+    const labels = records.map(r => r.date.slice(5));
+    const scores = records.map(r => r.score);
+
+    if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
+    const ctx = document.getElementById('my-chart').getContext('2d');
+    chartInstance = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [{
+          label: 'TOEICスコア',
+          data: scores,
+          borderColor: '#c8b4f0',
+          backgroundColor: 'rgba(200,180,240,0.08)',
+          pointBackgroundColor: '#c8b4f0',
+          pointRadius: 4,
+          tension: 0.3,
+          fill: true
+        },{
+          label: `目標 ${currentUser.targetScore}`,
+          data: Array(labels.length).fill(currentUser.targetScore),
+          borderColor: 'rgba(255,255,255,0.2)',
+          borderDash: [6,4],
+          pointRadius: 0,
+          fill: false
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          legend: { labels: { color: '#a0a0b0', font: { family: 'Noto Sans JP' } } }
+        },
+        scales: {
+          x: { ticks: { color: '#606070', font: { size: 11 } }, grid: { color: 'rgba(255,255,255,0.04)' } },
+          y: { ticks: { color: '#606070' }, grid: { color: 'rgba(255,255,255,0.04)' }, min: 0, max: 990 }
+        }
+      }
+    });
+  }
+
+  window.logout = function() {
+    if (!confirm('このデバイスからログアウトしますか？（データは消えません）')) return;
+    localStorage.removeItem('toeic_user_id');
+    currentUser = null;
+    showRegister();
+  };
+</script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0d0d14;
+    --bg2: #13131f;
+    --bg3: #1a1a28;
+    --border: rgba(255,255,255,0.07);
+    --accent: #c8b4f0;
+    --accent2: #8b6fd4;
+    --text: #e8e8f0;
+    --muted: #7070a0;
+    --success: #6ee7b7;
+    --font-head: 'Syne', sans-serif;
+    --font-body: 'Noto Sans JP', sans-serif;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-body);
+    min-height: 100vh;
+    line-height: 1.6;
+  }
+
+  /* ---- 登録画面 ---- */
+  #register-screen {
+    display: none;
+    min-height: 100vh;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+    background: radial-gradient(ellipse at 60% 20%, rgba(139,111,212,0.12) 0%, transparent 60%);
+  }
+
+  .register-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 3rem 2.5rem;
+    width: 100%;
+    max-width: 420px;
+  }
+
+  .register-card .logo {
+    font-family: var(--font-head);
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--accent);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-bottom: 2rem;
+  }
+
+  .register-card h1 {
+    font-family: var(--font-head);
+    font-size: 2rem;
+    font-weight: 800;
+    line-height: 1.2;
+    margin-bottom: 0.5rem;
+  }
+
+  .register-card .sub {
+    color: var(--muted);
+    font-size: 0.9rem;
+    margin-bottom: 2rem;
+  }
+
+  .field { margin-bottom: 1.25rem; }
+  .field label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 0.4rem; letter-spacing: 0.05em; }
+  .field input {
+    width: 100%;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0.75rem 1rem;
+    color: var(--text);
+    font-family: var(--font-body);
+    font-size: 1rem;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .field input:focus { border-color: var(--accent2); }
+
+  .btn-primary {
+    width: 100%;
+    background: var(--accent);
+    color: #1a0a3a;
+    border: none;
+    border-radius: 10px;
+    padding: 0.85rem;
+    font-family: var(--font-head);
+    font-size: 1rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: opacity 0.2s, transform 0.1s;
+    margin-top: 0.5rem;
+  }
+  .btn-primary:hover { opacity: 0.9; transform: translateY(-1px); }
+  .btn-primary:active { transform: translateY(0); }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+  /* ---- アプリ画面 ---- */
+  #app-screen { display: none; max-width: 680px; margin: 0 auto; padding: 0 0 6rem; }
+
+  .app-header {
+    padding: 1.5rem 1.25rem 1rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+    z-index: 10;
+  }
+
+  .app-header .logo {
+    font-family: var(--font-head);
+    font-size: 1rem;
+    font-weight: 800;
+    color: var(--accent);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .app-header .user-info {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+
+  .logout-btn {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 6px;
+    padding: 0.3rem 0.7rem;
+    font-size: 0.75rem;
+    cursor: pointer;
+    font-family: var(--font-body);
+    transition: border-color 0.2s, color 0.2s;
+  }
+  .logout-btn:hover { border-color: var(--muted); color: var(--text); }
+
+  /* ---- タブ ---- */
+  .tab-bar {
+    display: flex;
+    padding: 0.75rem 1.25rem;
+    gap: 0.5rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    position: sticky;
+    top: 57px;
+    z-index: 9;
+  }
+
+  .tab-btn {
+    flex: 1;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 0.55rem 0.5rem;
+    color: var(--muted);
+    font-family: var(--font-body);
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-align: center;
+  }
+  .tab-btn:hover { color: var(--text); background: var(--bg3); }
+  .tab-btn.active {
+    background: rgba(200,180,240,0.12);
+    border-color: rgba(200,180,240,0.25);
+    color: var(--accent);
+    font-weight: 500;
+  }
+
+  /* ---- コンテンツ共通 ---- */
+  .tab-content { padding: 1.5rem 1.25rem; display: none; }
+  .section-title {
+    font-family: var(--font-head);
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--muted);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    margin-bottom: 1rem;
+  }
+
+  .loading { color: var(--muted); font-size: 0.9rem; text-align: center; padding: 2rem; }
+  .empty-state { color: var(--muted); font-size: 0.9rem; text-align: center; padding: 3rem 1rem; line-height: 1.8; }
+
+  /* ---- ランキング ---- */
+  .rank-item {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.9rem 1rem;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    margin-bottom: 0.6rem;
+    transition: border-color 0.2s;
+  }
+  .rank-item.is-me { border-color: rgba(200,180,240,0.35); background: rgba(200,180,240,0.05); }
+  .rank-medal { font-size: 1.2rem; width: 28px; text-align: center; flex-shrink: 0; color: var(--muted); font-family: var(--font-head); font-weight: 700; }
+  .rank-info { flex: 1; min-width: 0; }
+  .rank-name { font-size: 0.95rem; font-weight: 500; margin-bottom: 0.35rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rank-bar-wrap { background: rgba(255,255,255,0.05); border-radius: 4px; height: 4px; overflow: hidden; }
+  .rank-bar { height: 100%; background: linear-gradient(90deg, var(--accent2), var(--accent)); border-radius: 4px; transition: width 0.8s ease; }
+  .rank-hours { font-family: var(--font-head); font-size: 1.1rem; font-weight: 700; color: var(--accent); flex-shrink: 0; }
+  .unit { font-size: 0.7rem; color: var(--muted); margin-left: 1px; }
+
+  /* ---- メンバー一覧 ---- */
+  .member-table { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .member-header {
+    display: grid;
+    grid-template-columns: 1fr 80px 100px 90px;
+    padding: 0.7rem 1rem;
+    font-size: 0.75rem;
+    color: var(--muted);
+    border-bottom: 1px solid var(--border);
+    letter-spacing: 0.04em;
+  }
+  .member-row {
+    display: grid;
+    grid-template-columns: 1fr 80px 100px 90px;
+    padding: 0.8rem 1rem;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.9rem;
+    transition: background 0.15s;
+    align-items: center;
+  }
+  .member-row:last-child { border-bottom: none; }
+  .member-row:hover { background: rgba(255,255,255,0.02); }
+  .member-row.is-me { background: rgba(200,180,240,0.05); }
+  .member-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .member-score { font-family: var(--font-head); font-weight: 700; color: var(--accent); }
+  .member-target { color: var(--muted); font-size: 0.88rem; }
+  .member-hours { color: var(--text); font-size: 0.88rem; }
+  .progress-pill {
+    display: inline-block;
+    background: rgba(200,180,240,0.15);
+    color: var(--accent);
+    font-size: 0.7rem;
+    padding: 1px 5px;
+    border-radius: 4px;
+    margin-left: 4px;
+  }
+
+  /* ---- 入力 ---- */
+  .input-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 1.75rem;
+  }
+  .input-date-label {
+    font-family: var(--font-head);
+    font-size: 0.8rem;
+    color: var(--muted);
+    letter-spacing: 0.08em;
+    margin-bottom: 1.5rem;
+  }
+  .input-row { margin-bottom: 1.25rem; }
+  .input-row label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 0.4rem; }
+  .input-row input {
+    width: 100%;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0.8rem 1rem;
+    color: var(--text);
+    font-family: var(--font-head);
+    font-size: 1.4rem;
+    font-weight: 700;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .input-row input:focus { border-color: var(--accent2); }
+  .input-note { font-size: 0.8rem; color: var(--accent); margin-bottom: 1rem; min-height: 1.2em; }
+  .success-msg {
+    display: none;
+    text-align: center;
+    padding: 1rem;
+    background: rgba(110,231,183,0.1);
+    border: 1px solid rgba(110,231,183,0.25);
+    border-radius: 10px;
+    color: var(--success);
+    font-size: 0.95rem;
+    margin-top: 1rem;
+  }
+
+  /* ---- マイページ ---- */
+  .my-header { margin-bottom: 1.5rem; }
+  .my-header h2 { font-family: var(--font-head); font-size: 1.6rem; font-weight: 800; }
+  .my-header .target-label { font-size: 0.85rem; color: var(--muted); margin-top: 0.25rem; }
+
+  .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 1.5rem; }
+  .stat-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1rem 1.25rem;
+  }
+  .stat-val { font-family: var(--font-head); font-size: 1.6rem; font-weight: 800; color: var(--accent); }
+  .stat-val.pos { color: var(--success); }
+  .stat-val.neg { color: #f87171; }
+  .stat-label { font-size: 0.78rem; color: var(--muted); margin-top: 0.2rem; }
+
+  .chart-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem;
+  }
+  .chart-card canvas { max-height: 260px; }
+
+  /* ---- バッジ ---- */
+  .me-badge {
+    display: inline-block;
+    background: rgba(200,180,240,0.2);
+    color: var(--accent);
+    font-size: 0.65rem;
+    padding: 1px 5px;
+    border-radius: 4px;
+    margin-left: 4px;
+    vertical-align: middle;
+    font-weight: 500;
+  }
+
+  @media (max-width: 420px) {
+    .member-header, .member-row { grid-template-columns: 1fr 65px 85px 70px; font-size: 0.82rem; }
+    .stats-grid { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- 登録画面 -->
+<div id="register-screen">
+  <div class="register-card">
+    <div class="logo">TOEIC Tracker</div>
+    <h1>はじめよう</h1>
+    <p class="sub">架空の名前で参加できます。データは全員で共有されます。</p>
+    <div class="field">
+      <label>あなたの名前（架空でOK）</label>
+      <input type="text" id="reg-name" placeholder="例：英語マスター志望" maxlength="20">
+    </div>
+    <div class="field">
+      <label>目標TOEICスコア</label>
+      <input type="number" id="reg-target" placeholder="例：800" min="10" max="990" step="5">
+    </div>
+    <button class="btn-primary" id="reg-btn" onclick="register()">参加する</button>
+  </div>
+</div>
+
+<!-- アプリ画面 -->
+<div id="app-screen">
+  <header class="app-header">
+    <div class="logo">TOEIC Tracker</div>
+    <div class="user-info">
+      <span id="current-user-name"></span>
+      <button class="logout-btn" onclick="logout()">ログアウト</button>
+    </div>
+  </header>
+
+  <nav class="tab-bar">
+    <button class="tab-btn" data-tab="ranking" onclick="loadTab('ranking')">ランキング</button>
+    <button class="tab-btn" data-tab="members" onclick="loadTab('members')">メンバー</button>
+    <button class="tab-btn" data-tab="input" onclick="loadTab('input')">入力</button>
+    <button class="tab-btn" data-tab="mypage" onclick="loadTab('mypage')">マイページ</button>
+  </nav>
+
+  <!-- ランキング -->
+  <div class="tab-content" id="tab-ranking">
+    <div class="section-title">今月の勉強時間ランキング</div>
+    <div id="ranking-list"></div>
+  </div>
+
+  <!-- メンバー -->
+  <div class="tab-content" id="tab-members">
+    <div class="section-title">メンバー一覧</div>
+    <div id="members-list"></div>
+  </div>
+
+  <!-- 入力 -->
+  <div class="tab-content" id="tab-input">
+    <div class="section-title">今日の記録</div>
+    <div class="input-card">
+      <div class="input-date-label">記録日：<span id="input-date"></span></div>
+      <div class="input-row">
+        <label>TOEICスコア（または模試スコア）</label>
+        <input type="number" id="input-score" placeholder="例：750" min="10" max="990">
+      </div>
+      <div class="input-row">
+        <label>今日の勉強時間（時間）</label>
+        <input type="number" id="input-hours" placeholder="例：2.5" min="0" max="24" step="0.5">
+      </div>
+      <div class="input-note" id="input-note"></div>
+      <button class="btn-primary" id="submit-btn" onclick="submitRecord()">記録する</button>
+      <div class="success-msg" id="input-success">記録しました！ランキングに反映されます。</div>
+    </div>
+  </div>
+
+  <!-- マイページ -->
+  <div class="tab-content" id="tab-mypage">
+    <div class="my-header">
+      <h2 id="my-name"></h2>
+      <div class="target-label">目標スコア：<span id="my-target"></span></div>
+    </div>
+    <div class="stats-grid" id="my-stats"></div>
+    <div class="chart-card" id="my-chart-wrap">
+      <canvas id="my-chart"></canvas>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
