@@ -10,7 +10,7 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
 import {
   getFirestore, collection, doc, setDoc, addDoc, getDocs,
-  getDoc, query, where, orderBy, updateDoc
+  getDoc, query, where, updateDoc
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
 
 const firebaseConfig = {
@@ -24,44 +24,35 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
-
 let currentUser = null;
 let chartInstance = null;
 
 // ---- ユーティリティ ----
 function hashPW(pw) {
-  let hash = 0;
-  for (let i = 0; i < pw.length; i++) {
-    hash = ((hash << 5) - hash) + pw.charCodeAt(i);
-    hash |= 0;
-  }
-  return hash.toString(16);
+  let h = 0;
+  for (let i = 0; i < pw.length; i++) { h = ((h << 5) - h) + pw.charCodeAt(i); h |= 0; }
+  return h.toString(16);
 }
-
-function getWeekKey() {
-  const now = new Date();
-  const d = new Date(now);
-  d.setHours(0,0,0,0);
-  d.setDate(d.getDate() - d.getDay() + 1);
-  return d.toISOString().slice(0,10);
+function localDateStr(d) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
-
-function getMonthKey() {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+function getTodayKey()  { return localDateStr(new Date()); }
+function getMonthKey()  {
+  const n = new Date();
+  return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}`;
 }
-
-function getTodayKey() {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+function getWeekStartKey() {
+  const d = new Date();
+  const day = d.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  d.setDate(d.getDate() + diff);
+  return localDateStr(d);
 }
-
 function daysUntil(dateStr) {
   if (!dateStr) return null;
-  const target = new Date(dateStr);
-  const now = new Date();
-  now.setHours(0,0,0,0);
-  return Math.ceil((target - now) / (1000*60*60*24));
+  const target = new Date(dateStr + 'T00:00:00');
+  const now = new Date(); now.setHours(0,0,0,0);
+  return Math.ceil((target - now) / 86400000);
 }
 
 // ---- 初期化 ----
@@ -69,534 +60,527 @@ window.addEventListener('DOMContentLoaded', async () => {
   const savedId = localStorage.getItem('toeic_uid');
   if (savedId) {
     const snap = await getDoc(doc(db, 'users', savedId));
-    if (snap.exists()) {
-      currentUser = { id: savedId, ...snap.data() };
-      showApp();
-      return;
-    }
+    if (snap.exists()) { currentUser = { id: savedId, ...snap.data() }; showApp(); return; }
   }
   showAuth('login');
 });
 
-// ---- 認証画面 ----
+// ---- 認証 ----
 function showAuth(mode) {
   document.getElementById('auth-screen').style.display = 'flex';
   document.getElementById('app-screen').style.display = 'none';
   switchAuthMode(mode);
 }
-
 window.switchAuthMode = function(mode) {
-  document.getElementById('auth-login').style.display = mode === 'login' ? 'block' : 'none';
-  document.getElementById('auth-register').style.display = mode === 'register' ? 'block' : 'none';
+  document.getElementById('auth-login').style.display    = mode==='login'    ? 'block' : 'none';
+  document.getElementById('auth-register').style.display = mode==='register' ? 'block' : 'none';
+  document.getElementById('login-err').style.display = 'none';
+  document.getElementById('reg-err').style.display   = 'none';
 };
-
+function showErr(id, msg) {
+  const el = document.getElementById(id);
+  el.textContent = msg; el.style.display = 'block';
+}
 window.login = async function() {
   const name = document.getElementById('login-name').value.trim();
-  const pw = document.getElementById('login-pw').value;
-  if (!name || !pw) { showError('login-err', '名前とパスワードを入力してください'); return; }
+  const pw   = document.getElementById('login-pw').value;
+  if (!name || !pw) { showErr('login-err','名前とパスワードを入力してください'); return; }
   const btn = document.getElementById('login-btn');
   btn.disabled = true; btn.textContent = 'ログイン中...';
   try {
-    const q = query(collection(db, 'users'), where('name', '==', name));
-    const snap = await getDocs(q);
-    if (snap.empty) { showError('login-err', 'ユーザーが見つかりません'); return; }
-    const userData = snap.docs[0];
-    if (userData.data().pwHash !== hashPW(pw)) { showError('login-err', 'パスワードが違います'); return; }
-    currentUser = { id: userData.id, ...userData.data() };
-    localStorage.setItem('toeic_uid', userData.id);
+    const snap = await getDocs(query(collection(db,'users'), where('name','==',name)));
+    if (snap.empty) { showErr('login-err','ユーザーが見つかりません'); return; }
+    const ud = snap.docs[0];
+    if (ud.data().pwHash !== hashPW(pw)) { showErr('login-err','パスワードが違います'); return; }
+    currentUser = { id: ud.id, ...ud.data() };
+    localStorage.setItem('toeic_uid', ud.id);
     showApp();
-  } catch(e) { showError('login-err', 'エラー: ' + e.message); }
-  finally { btn.disabled = false; btn.textContent = 'ログイン'; }
+  } catch(e) { showErr('login-err','エラー: '+e.message); }
+  finally { btn.disabled=false; btn.textContent='ログイン'; }
 };
-
 window.register = async function() {
-  const name = document.getElementById('reg-name').value.trim();
-  const pw = document.getElementById('reg-pw').value;
-  const pw2 = document.getElementById('reg-pw2').value;
+  const name   = document.getElementById('reg-name').value.trim();
+  const pw     = document.getElementById('reg-pw').value;
+  const pw2    = document.getElementById('reg-pw2').value;
   const target = parseInt(document.getElementById('reg-target').value);
-  if (!name) { showError('reg-err', '名前を入力してください'); return; }
-  if (pw.length < 8) { showError('reg-err', 'パスワードは8文字以上で入力してください'); return; }
-  if (!/^[a-zA-Z0-9]+$/.test(pw)) { showError('reg-err', 'パスワードは英数字のみ使用できます'); return; }
-  if (pw !== pw2) { showError('reg-err', 'パスワードが一致しません'); return; }
-  if (!target || target < 10 || target > 990) { showError('reg-err', '目標スコアを正しく入力してください（10〜990）'); return; }
+  if (!name)               { showErr('reg-err','名前を入力してください'); return; }
+  if (pw.length < 8)       { showErr('reg-err','パスワードは8文字以上で入力してください'); return; }
+  if (!/^[a-zA-Z0-9]+$/.test(pw)) { showErr('reg-err','パスワードは英数字のみ使用できます'); return; }
+  if (pw !== pw2)          { showErr('reg-err','パスワードが一致しません'); return; }
+  if (!target||target<10||target>990) { showErr('reg-err','目標スコアを正しく入力してください（10〜990）'); return; }
   const btn = document.getElementById('reg-btn');
-  btn.disabled = true; btn.textContent = '登録中...';
+  btn.disabled=true; btn.textContent='登録中...';
   try {
-    const q = query(collection(db, 'users'), where('name', '==', name));
-    const existing = await getDocs(q);
-    if (!existing.empty) { showError('reg-err', 'その名前はすでに使われています'); return; }
-    const uid = 'u_' + Date.now() + '_' + Math.random().toString(36).slice(2,6);
-    const now = getTodayKey();
-    await setDoc(doc(db, 'users', uid), {
-      name, pwHash: hashPW(pw), targetScore: target,
-      deadline: '', comment: '', latestScore: null,
-      createdAt: now
-    });
-    currentUser = { id: uid, name, targetScore: target, deadline: '', comment: '', latestScore: null, createdAt: now };
+    const ex = await getDocs(query(collection(db,'users'), where('name','==',name)));
+    if (!ex.empty) { showErr('reg-err','その名前はすでに使われています'); return; }
+    const uid   = 'u_'+Date.now()+'_'+Math.random().toString(36).slice(2,6);
+    const today = getTodayKey();
+    await setDoc(doc(db,'users',uid), { name, pwHash:hashPW(pw), targetScore:target, deadline:'', comment:'', createdAt:today });
+    currentUser = { id:uid, name, targetScore:target, deadline:'', comment:'', createdAt:today };
     localStorage.setItem('toeic_uid', uid);
     showApp();
-  } catch(e) { showError('reg-err', 'エラー: ' + e.message); }
-  finally { btn.disabled = false; btn.textContent = '登録する'; }
+  } catch(e) { showErr('reg-err','エラー: '+e.message); }
+  finally { btn.disabled=false; btn.textContent='登録する'; }
 };
 
-function showError(id, msg) {
-  const el = document.getElementById(id);
-  el.textContent = msg;
-  el.style.display = 'block';
-}
-
-// ---- アプリ画面 ----
+// ---- アプリ ----
 function showApp() {
   document.getElementById('auth-screen').style.display = 'none';
-  document.getElementById('app-screen').style.display = 'block';
-  document.getElementById('header-name').textContent = currentUser.name;
+  document.getElementById('app-screen').style.display  = 'block';
+  document.getElementById('header-name').textContent    = currentUser.name;
   loadTab('home');
 }
-
 window.loadTab = function(tab) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   const btn = document.querySelector(`[data-tab="${tab}"]`);
   if (btn) btn.classList.add('active');
-  document.querySelectorAll('.tab-content').forEach(c => c.style.display = 'none');
+  document.querySelectorAll('.tab-content').forEach(c => c.style.display='none');
   document.getElementById(`tab-${tab}`).style.display = 'block';
-  if (tab === 'home') loadHome();
-  if (tab === 'members') loadMembers();
-  if (tab === 'input') loadInput();
-  if (tab === 'mypage') loadMyPage();
+  if (tab==='home')    loadHome();
+  if (tab==='members') loadMembers();
+  if (tab==='input')   loadInput();
+  if (tab==='mypage')  loadMyPage();
 };
-
-window.goMyPage = function() { loadTab('mypage'); };
-window.logout = function() {
+window.goMyPage = () => loadTab('mypage');
+window.logout   = function() {
   if (!confirm('ログアウトしますか？')) return;
   localStorage.removeItem('toeic_uid');
-  currentUser = null;
-  showAuth('login');
+  currentUser = null; showAuth('login');
 };
 
-// ---- ホーム（ランキング） ----
+// ---- ホーム ----
 async function loadHome() {
   const el = document.getElementById('home-content');
   el.innerHTML = '<div class="loading">読み込み中...</div>';
 
-  const weekKey = getWeekKey();
-  const monthKey = getMonthKey();
+  const weekStart = getWeekStartKey();
+  const monthKey  = getMonthKey();
 
-  const [userSnap, recSnap, scoreSnap] = await Promise.all([
-    getDocs(collection(db, 'users')),
-    getDocs(collection(db, 'records')),
-    getDocs(query(collection(db, 'records'), orderBy('date', 'desc')))
+  const [userSnap, recSnap] = await Promise.all([
+    getDocs(collection(db,'users')),
+    getDocs(collection(db,'records'))
   ]);
 
   const users = {};
-  userSnap.forEach(d => { users[d.id] = { id: d.id, ...d.data() }; });
+  userSnap.forEach(d => { users[d.id] = { id:d.id, ...d.data() }; });
 
-  const weekHours = {}, monthHours = {}, latestScore = {};
+  const weekH={}, monthH={}, latestScore={}, latestDate={};
   recSnap.forEach(d => {
-    const r = d.data();
-    if (r.date >= weekKey) weekHours[r.userId] = (weekHours[r.userId]||0) + (r.studyHours||0);
-    if (r.monthKey === monthKey) monthHours[r.userId] = (monthHours[r.userId]||0) + (r.studyHours||0);
-  });
-  scoreSnap.forEach(d => {
-    const r = d.data();
-    if (!latestScore[r.userId] && r.score) latestScore[r.userId] = r.score;
+    const r = d.data(); const uid = r.userId; if (!uid) return;
+    if (r.date && r.date >= weekStart)            weekH[uid]  = (weekH[uid]||0)  + (r.studyHours||0);
+    if (r.monthKey && r.monthKey === monthKey)    monthH[uid] = (monthH[uid]||0) + (r.studyHours||0);
+    if (r.score && r.date && (!latestDate[uid] || r.date > latestDate[uid])) {
+      latestDate[uid]=r.date; latestScore[uid]=r.score;
+    }
   });
 
-  const weekRank = Object.entries(weekHours).sort((a,b) => b[1]-a[1]);
-  const monthRank = Object.entries(monthHours).sort((a,b) => b[1]-a[1]);
-  const scoreRank = Object.entries(latestScore).sort((a,b) => b[1]-a[1]);
+  const weekRank  = Object.entries(weekH).sort((a,b)=>b[1]-a[1]);
+  const monthRank = Object.entries(monthH).sort((a,b)=>b[1]-a[1]);
+  const scoreRank = Object.entries(latestScore).sort((a,b)=>b[1]-a[1]);
 
   el.innerHTML = `
     <div class="rank-grid">
       <div class="rank-panel">
         <div class="section-title">今週の勉強時間</div>
-        ${renderHoursRanking(weekRank, users, 'h')}
+        ${rankHoursHtml(weekRank, users)}
       </div>
       <div class="rank-panel">
         <div class="section-title">今月の勉強時間</div>
-        ${renderHoursRanking(monthRank, users, 'h')}
+        ${rankHoursHtml(monthRank, users)}
       </div>
     </div>
-    <div class="section-title" style="margin-top:1.5rem">現在のTOEICスコアランキング</div>
-    ${renderScoreRanking(scoreRank, users)}
-  `;
+    <div style="margin-top:1.1rem">
+      <div class="section-title">TOEICスコアランキング</div>
+      <div class="score-rank-list">${rankScoreHtml(scoreRank, users)}</div>
+    </div>`;
 }
 
-function renderHoursRanking(ranked, users, unit) {
-  if (ranked.length === 0) return '<div class="empty-state">まだデータがありません</div>';
-  const max = ranked[0][1] || 1;
-  return ranked.map(([uid, val], i) => {
-    const u = users[uid] || { name: '不明' };
-    const pct = (val / max * 100).toFixed(1);
-    const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i+1}`;
-    const isMe = uid === currentUser?.id;
-    return `<div class="rank-item ${isMe?'is-me':''}">
+function rankHoursHtml(ranked, users) {
+  if (!ranked.length) return '<div class="empty-s">まだデータがありません</div>';
+  const max = ranked[0][1]||1;
+  return ranked.map(([uid,val],i) => {
+    const u = users[uid]||{name:'不明'};
+    const isMe = uid===currentUser?.id;
+    const medal = i===0?'🥇':i===1?'🥈':i===2?'🥉':`${i+1}`;
+    return `<div class="rank-item${isMe?' is-me':''}">
       <div class="rank-medal">${medal}</div>
       <div class="rank-info">
         <div class="rank-name">${u.name}${isMe?'<span class="me-badge">あなた</span>':''}</div>
-        <div class="rank-bar-wrap"><div class="rank-bar" style="width:${pct}%"></div></div>
+        <div class="rank-bar-wrap"><div class="rank-bar" style="width:${(val/max*100).toFixed(0)}%"></div></div>
       </div>
-      <div class="rank-val">${val.toFixed(1)}<span class="unit">${unit}</span></div>
+      <div class="rank-val">${val.toFixed(1)}<span class="unit">h</span></div>
     </div>`;
   }).join('');
 }
 
-function renderScoreRanking(ranked, users) {
-  if (ranked.length === 0) return '<div class="empty-state">まだスコアデータがありません</div>';
-  const max = ranked[0][1] || 1;
-  return `<div class="score-rank-list">${ranked.map(([uid, score], i) => {
-    const u = users[uid] || { name: '不明' };
-    const pct = (score / 990 * 100).toFixed(1);
-    const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i+1}`;
-    const isMe = uid === currentUser?.id;
-    const diff = u.targetScore ? score - u.targetScore : null;
-    return `<div class="rank-item ${isMe?'is-me':''}">
+function rankScoreHtml(ranked, users) {
+  if (!ranked.length) return '<div class="empty-s">スコアデータがありません</div>';
+  return ranked.map(([uid,score],i) => {
+    const u = users[uid]||{name:'不明'};
+    const isMe = uid===currentUser?.id;
+    const medal = i===0?'🥇':i===1?'🥈':i===2?'🥉':`${i+1}`;
+    const diff = u.targetScore ? score-u.targetScore : null;
+    return `<div class="rank-item${isMe?' is-me':''}">
       <div class="rank-medal">${medal}</div>
       <div class="rank-info">
         <div class="rank-name">${u.name}${isMe?'<span class="me-badge">あなた</span>':''}
-          ${diff !== null ? `<span class="diff-badge ${diff>=0?'pos':'neg'}">${diff>=0?'+':''}${diff}</span>` : ''}
+          ${diff!==null?`<span class="dbadge ${diff>=0?'pos':'neg'}">${diff>=0?'+':''}${diff}</span>`:''}
         </div>
-        <div class="rank-bar-wrap"><div class="rank-bar score-bar" style="width:${pct}%"></div></div>
+        <div class="rank-bar-wrap"><div class="rank-bar score-bar" style="width:${(score/990*100).toFixed(0)}%"></div></div>
       </div>
       <div class="rank-val">${score}<span class="unit">点</span></div>
     </div>`;
-  }).join('')}</div>`;
+  }).join('');
 }
 
-// ---- メンバー一覧 ----
+// ---- メンバー ----
 async function loadMembers() {
   const el = document.getElementById('members-list');
   el.innerHTML = '<div class="loading">読み込み中...</div>';
   try {
     const [userSnap, recSnap] = await Promise.all([
-      getDocs(collection(db, 'users')),
-      getDocs(query(collection(db, 'records'), orderBy('date','desc')))
+      getDocs(collection(db,'users')),
+      getDocs(collection(db,'records'))
     ]);
     const users = [];
-    userSnap.forEach(d => users.push({ id: d.id, ...d.data() }));
+    userSnap.forEach(d => users.push({ id:d.id, ...d.data() }));
 
-    const latestScore = {};
+    const latestScore={}, latestDate={};
     recSnap.forEach(d => {
-      const r = d.data();
-      if (!latestScore[r.userId] && r.score) latestScore[r.userId] = r.score;
+      const r=d.data();
+      if (r.score && r.date && (!latestDate[r.userId]||r.date>latestDate[r.userId])) {
+        latestDate[r.userId]=r.date; latestScore[r.userId]=r.score;
+      }
     });
 
-    if (users.length === 0) { el.innerHTML = '<div class="empty-state">メンバーがいません</div>'; return; }
-
+    if (!users.length) { el.innerHTML='<div class="empty-s">メンバーがいません</div>'; return; }
     el.innerHTML = users.map(u => {
       const score = latestScore[u.id];
-      const diff = (score && u.targetScore) ? score - u.targetScore : null;
-      const days = daysUntil(u.deadline);
-      const isMe = u.id === currentUser?.id;
-      return `<div class="member-card ${isMe?'is-me':''}">
-        <div class="member-card-header">
-          <span class="member-card-name">${u.name}${isMe?'<span class="me-badge">あなた</span>':''}</span>
-          <span class="member-join">参加日 ${u.createdAt||'—'}</span>
+      const diff  = (score && u.targetScore) ? score - u.targetScore : null;
+      const days  = daysUntil(u.deadline);
+      const isMe  = u.id === currentUser?.id;
+      return `<div class="mc${isMe?' is-me':''}">
+        <div class="mc-row">
+          <span class="mc-name">${u.name}${isMe?'<span class="me-badge">あなた</span>':''}</span>
+          <span class="mc-meta">参加 ${u.createdAt||'—'}</span>
         </div>
-        <div class="member-card-body">
-          <div class="member-stat"><div class="mstat-label">目標スコア</div><div class="mstat-val">${u.targetScore||'—'}</div></div>
-          <div class="member-stat"><div class="mstat-label">現在との差分</div><div class="mstat-val ${diff===null?'':diff>=0?'pos':'neg'}">${diff===null?'—':(diff>=0?'+':'')+diff}</div></div>
-          <div class="member-stat"><div class="mstat-label">達成期限</div><div class="mstat-val">${u.deadline||'—'}${days!==null?`<span class="days-badge">${days}日</span>`:''}</div></div>
+        <div class="mc-stats">
+          <div class="mc-s"><div class="msl">目標スコア</div><div class="msv">${u.targetScore||'—'}</div></div>
+          <div class="mc-s"><div class="msl">目標との差</div><div class="msv ${diff===null?'':diff>=0?'pos':'neg'}">${diff===null?'—':(diff>=0?'+':'')+diff}</div></div>
+          <div class="mc-s"><div class="msl">期限${days!==null?'（残'+days+'日）':''}</div><div class="msv">${u.deadline||'—'}</div></div>
         </div>
-        ${u.comment ? `<div class="member-comment">${u.comment}</div>` : ''}
+        ${u.comment?`<div class="mc-comment">"${u.comment}"</div>`:''}
       </div>`;
     }).join('');
-  } catch(e) {
-    el.innerHTML = `<div class="empty-state">読み込みエラー: ${e.message}</div>`;
-  }
+  } catch(e) { el.innerHTML=`<div class="empty-s">読み込みエラー: ${e.message}</div>`; }
 }
 
-// ---- 入力タブ ----
+// ---- 勉強時間入力 ----
 async function loadInput() {
-  const todayKey = getTodayKey();
-  const weekKey = getWeekKey();
-  const monthKey = getMonthKey();
-
+  const todayKey  = getTodayKey();
+  const weekStart = getWeekStartKey();
+  const monthKey  = getMonthKey();
   document.getElementById('input-today-label').textContent = todayKey;
 
-  const recSnap = await getDocs(query(
-    collection(db, 'records'),
-    where('userId','==', currentUser.id),
-    orderBy('date','desc')
-  ));
+  const recSnap = await getDocs(query(collection(db,'records'), where('userId','==',currentUser.id)));
+  let todayHours=0, weekTotal=0, monthTotal=0, todayDocId=null;
 
-  let todayHours = 0, weekTotal = 0, monthTotal = 0, todayDocId = null;
   recSnap.forEach(d => {
     const r = d.data();
-    if (r.date === todayKey) { todayHours = r.studyHours||0; todayDocId = d.id; }
-    if (r.date >= weekKey) weekTotal += r.studyHours||0;
-    if (r.monthKey === monthKey) monthTotal += r.studyHours||0;
+    const h = r.studyHours||0;
+    if (r.date === todayKey) { todayHours = h; todayDocId = d.id; }
+    if (r.date && r.date >= weekStart)         weekTotal  += h;
+    if (r.monthKey && r.monthKey === monthKey) monthTotal += h;
   });
 
-  document.getElementById('input-hours').value = todayHours || '';
-  document.getElementById('display-week').textContent = weekTotal.toFixed(1);
-  document.getElementById('display-month').textContent = monthTotal.toFixed(1);
-  document.getElementById('input-today-doc').value = todayDocId || '';
+  document.getElementById('input-hours').value          = todayHours||'';
+  document.getElementById('display-week').textContent   = weekTotal.toFixed(1);
+  document.getElementById('display-month').textContent  = monthTotal.toFixed(1);
+  document.getElementById('input-today-doc').value      = todayDocId||'';
 
+  const weekBase  = weekTotal  - todayHours;
+  const monthBase = monthTotal - todayHours;
   document.getElementById('input-hours').oninput = function() {
-    const val = parseFloat(this.value) || 0;
-    const base = todayDocId ? weekTotal - todayHours : weekTotal;
-    const baseM = todayDocId ? monthTotal - todayHours : monthTotal;
-    document.getElementById('display-week').textContent = (base + val).toFixed(1);
-    document.getElementById('display-month').textContent = (baseM + val).toFixed(1);
+    const v = parseFloat(this.value)||0;
+    document.getElementById('display-week').textContent  = (weekBase  + v).toFixed(1);
+    document.getElementById('display-month').textContent = (monthBase + v).toFixed(1);
   };
 }
 
 window.submitRecord = async function() {
   const hours = parseFloat(document.getElementById('input-hours').value);
-  if (isNaN(hours) || hours < 0 || hours > 24) { alert('勉強時間を正しく入力してください（0〜24時間）'); return; }
+  if (isNaN(hours)||hours<0||hours>24) { alert('勉強時間を正しく入力してください（0〜24時間）'); return; }
   const btn = document.getElementById('submit-btn');
-  btn.disabled = true; btn.textContent = '送信中...';
+  btn.disabled=true; btn.textContent='送信中...';
   try {
-    const todayKey = getTodayKey();
-    const monthKey = getMonthKey();
-    const weekKey = getWeekKey();
+    const todayKey  = getTodayKey();
+    const monthKey  = getMonthKey();
+    const weekStart = getWeekStartKey();
     const todayDocId = document.getElementById('input-today-doc').value;
     const data = {
-      userId: currentUser.id, userName: currentUser.name,
-      date: todayKey, monthKey, weekKey,
-      studyHours: hours, updatedAt: new Date().toISOString()
+      userId:currentUser.id, userName:currentUser.name,
+      date:todayKey, monthKey, weekStart,
+      studyHours:hours, updatedAt:new Date().toISOString()
     };
     if (todayDocId) {
-      await updateDoc(doc(db, 'records', todayDocId), data);
+      await updateDoc(doc(db,'records',todayDocId), data);
     } else {
-      await addDoc(collection(db, 'records'), data);
+      const ref = await addDoc(collection(db,'records'), data);
+      document.getElementById('input-today-doc').value = ref.id;
     }
-    document.getElementById('input-success').style.display = 'block';
-    setTimeout(() => { document.getElementById('input-success').style.display = 'none'; loadTab('home'); }, 1800);
-  } catch(e) { alert('送信に失敗しました: ' + e.message); }
-  finally { btn.disabled = false; btn.textContent = '記録する'; }
+    document.getElementById('input-success').style.display='block';
+    setTimeout(()=>{ document.getElementById('input-success').style.display='none'; loadTab('home'); }, 1600);
+  } catch(e) { alert('送信失敗: '+e.message); }
+  finally { btn.disabled=false; btn.textContent='記録する'; }
 };
 
 // ---- マイページ ----
 async function loadMyPage() {
-  document.getElementById('my-name-disp').textContent = currentUser.name;
-  document.getElementById('my-target-input').value = currentUser.targetScore || '';
-  document.getElementById('my-deadline-input').value = currentUser.deadline || '';
-  document.getElementById('my-comment-input').value = currentUser.comment || '';
+  document.getElementById('my-name-disp').textContent    = currentUser.name;
+  document.getElementById('my-target-input').value       = currentUser.targetScore||'';
+  document.getElementById('my-deadline-input').value     = currentUser.deadline||'';
+  document.getElementById('my-comment-input').value      = currentUser.comment||'';
 
-  const recSnap = await getDocs(query(
-    collection(db, 'records'),
-    where('userId','==', currentUser.id),
-    orderBy('date','asc')
-  ));
+  const recSnap = await getDocs(query(collection(db,'records'), where('userId','==',currentUser.id)));
+  const allRec  = [];
+  recSnap.forEach(d => allRec.push({ id:d.id, ...d.data() }));
 
-  const records = [];
-  recSnap.forEach(d => { const r = d.data(); if (r.score) records.push(r); });
+  // スコアがある記録を日付順でソート
+  const scoreRecs = allRec.filter(r=>r.score).sort((a,b)=>a.date>b.date?1:-1);
 
-  if (records.length === 0) {
-    document.getElementById('my-chart-wrap').innerHTML = '<div class="empty-state">スコアの記録がありません</div>';
-    document.getElementById('my-stats').innerHTML = '';
-  } else {
-    const latest = records[records.length-1];
-    const first = records[0];
-    const diff = latest.score - first.score;
-    const target = currentUser.targetScore;
-    const remaining = target ? target - latest.score : null;
+  // 今日のドキュメント（スコア記録用）
+  const todayKey = getTodayKey();
+  const todayDoc = allRec.find(r=>r.date===todayKey);
+  document.getElementById('score-doc-id').value    = todayDoc?.id||'';
+  document.getElementById('my-score-input').value  = todayDoc?.score||'';
 
+  // 統計・グラフ
+  if (scoreRecs.length) {
+    const latest = scoreRecs[scoreRecs.length-1];
+    const first  = scoreRecs[0];
+    const diff   = latest.score - first.score;
+    const rem    = currentUser.targetScore ? currentUser.targetScore - latest.score : null;
     document.getElementById('my-stats').innerHTML = `
       <div class="stat-card"><div class="stat-val">${latest.score}</div><div class="stat-label">最新スコア</div></div>
       <div class="stat-card"><div class="stat-val ${diff>=0?'pos':'neg'}">${diff>=0?'+':''}${diff}</div><div class="stat-label">初回からの変化</div></div>
-      <div class="stat-card"><div class="stat-val ${remaining===null?'':remaining<=0?'pos':'neg'}">${remaining===null?'—':(remaining<=0?'達成!':remaining+'点')}</div><div class="stat-label">目標まで</div></div>
-    `;
+      <div class="stat-card"><div class="stat-val ${rem===null?'':rem<=0?'pos':'neg'}">${rem===null?'—':rem<=0?'達成!':rem+'点'}</div><div class="stat-label">目標まで</div></div>`;
 
-    const labels = records.map(r => r.date.slice(5));
-    const scores = records.map(r => r.score);
-    if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
+    document.getElementById('my-chart-wrap').style.display='block';
+    if (chartInstance) { chartInstance.destroy(); chartInstance=null; }
     const ctx = document.getElementById('my-chart').getContext('2d');
     chartInstance = new Chart(ctx, {
-      type: 'line',
-      data: {
-        labels,
-        datasets: [
-          { label: 'TOEICスコア', data: scores, borderColor: '#c8b4f0', backgroundColor: 'rgba(200,180,240,0.08)', pointBackgroundColor: '#c8b4f0', pointRadius: 4, tension: 0.3, fill: true },
-          { label: `目標 ${target}`, data: Array(labels.length).fill(target), borderColor: 'rgba(255,255,255,0.2)', borderDash: [6,4], pointRadius: 0, fill: false }
+      type:'line',
+      data:{
+        labels: scoreRecs.map(r=>r.date.slice(5)),
+        datasets:[
+          { label:'TOEICスコア', data:scoreRecs.map(r=>r.score), borderColor:'#c8b4f0',
+            backgroundColor:'rgba(200,180,240,0.08)', pointBackgroundColor:'#c8b4f0', pointRadius:4, tension:0.3, fill:true },
+          { label:`目標 ${currentUser.targetScore}`, data:Array(scoreRecs.length).fill(currentUser.targetScore),
+            borderColor:'rgba(255,255,255,0.2)', borderDash:[6,4], pointRadius:0, fill:false }
         ]
       },
-      options: {
-        responsive: true,
-        plugins: { legend: { labels: { color: '#a0a0b0', font: { family: 'Noto Sans JP' } } } },
-        scales: {
-          x: { ticks: { color: '#606070', font: { size: 11 } }, grid: { color: 'rgba(255,255,255,0.04)' } },
-          y: { ticks: { color: '#606070' }, grid: { color: 'rgba(255,255,255,0.04)' }, min: 0, max: 990 }
+      options:{
+        responsive:true,
+        plugins:{ legend:{ labels:{ color:'#a0a0b0', font:{family:'Noto Sans JP'} } } },
+        scales:{
+          x:{ ticks:{color:'#606070',font:{size:11}}, grid:{color:'rgba(255,255,255,0.04)'} },
+          y:{ ticks:{color:'#606070'}, grid:{color:'rgba(255,255,255,0.04)'}, min:0, max:990 }
         }
       }
     });
-  }
-
-  // スコア入力欄
-  const todayKey = getTodayKey();
-  const todaySnap = await getDocs(query(
-    collection(db, 'records'),
-    where('userId','==', currentUser.id),
-    where('date','==', todayKey)
-  ));
-  if (!todaySnap.empty && todaySnap.docs[0].data().score) {
-    document.getElementById('my-score-input').value = todaySnap.docs[0].data().score;
-    document.getElementById('score-doc-id').value = todaySnap.docs[0].id;
   } else {
-    document.getElementById('my-score-input').value = '';
-    document.getElementById('score-doc-id').value = todaySnap.empty ? '' : todaySnap.docs[0].id;
+    document.getElementById('my-stats').innerHTML='';
+    document.getElementById('my-chart-wrap').style.display='none';
   }
 }
 
-window.saveProfile = async function() {
-  const target = parseInt(document.getElementById('my-target-input').value);
-  const deadline = document.getElementById('my-deadline-input').value;
-  const comment = document.getElementById('my-comment-input').value.trim();
-  if (!target || target < 10 || target > 990) { alert('目標スコアを正しく入力してください'); return; }
-  const btn = document.getElementById('save-profile-btn');
-  btn.disabled = true; btn.textContent = '保存中...';
-  try {
-    await updateDoc(doc(db, 'users', currentUser.id), { targetScore: target, deadline, comment });
-    currentUser.targetScore = target; currentUser.deadline = deadline; currentUser.comment = comment;
-    document.getElementById('profile-success').style.display = 'block';
-    setTimeout(() => document.getElementById('profile-success').style.display = 'none', 2000);
-  } catch(e) { alert('保存失敗: ' + e.message); }
-  finally { btn.disabled = false; btn.textContent = '保存する'; }
-};
-
 window.saveScore = async function() {
   const score = parseInt(document.getElementById('my-score-input').value);
-  if (!score || score < 10 || score > 990) { alert('スコアを正しく入力してください（10〜990）'); return; }
+  if (!score||score<10||score>990) { alert('スコアを正しく入力してください（10〜990）'); return; }
   const btn = document.getElementById('save-score-btn');
-  btn.disabled = true; btn.textContent = '保存中...';
+  btn.disabled=true; btn.textContent='保存中...';
   try {
-    const todayKey = getTodayKey();
-    const monthKey = getMonthKey();
-    const weekKey = getWeekKey();
-    const docId = document.getElementById('score-doc-id').value;
+    const todayKey  = getTodayKey();
+    const monthKey  = getMonthKey();
+    const weekStart = getWeekStartKey();
+    const docId     = document.getElementById('score-doc-id').value;
     if (docId) {
-      await updateDoc(doc(db, 'records', docId), { score, updatedAt: new Date().toISOString() });
+      await updateDoc(doc(db,'records',docId), { score, updatedAt:new Date().toISOString() });
     } else {
-      const ref = await addDoc(collection(db, 'records'), {
-        userId: currentUser.id, userName: currentUser.name,
-        date: todayKey, monthKey, weekKey,
-        score, studyHours: 0, updatedAt: new Date().toISOString()
+      const ref = await addDoc(collection(db,'records'), {
+        userId:currentUser.id, userName:currentUser.name,
+        date:todayKey, monthKey, weekStart,
+        score, studyHours:0, updatedAt:new Date().toISOString()
       });
       document.getElementById('score-doc-id').value = ref.id;
     }
-    await updateDoc(doc(db, 'users', currentUser.id), { latestScore: score });
-    currentUser.latestScore = score;
-    document.getElementById('score-success').style.display = 'block';
-    setTimeout(() => { document.getElementById('score-success').style.display = 'none'; loadMyPage(); }, 1500);
-  } catch(e) { alert('保存失敗: ' + e.message); }
-  finally { btn.disabled = false; btn.textContent = 'スコアを記録'; }
+    document.getElementById('score-success').style.display='block';
+    setTimeout(()=>{ document.getElementById('score-success').style.display='none'; loadMyPage(); }, 1500);
+  } catch(e) { alert('保存失敗: '+e.message); }
+  finally { btn.disabled=false; btn.textContent='スコアを記録'; }
+};
+
+window.saveProfile = async function() {
+  const target   = parseInt(document.getElementById('my-target-input').value);
+  const deadline = document.getElementById('my-deadline-input').value;
+  const comment  = document.getElementById('my-comment-input').value.trim();
+  if (!target||target<10||target>990) { alert('目標スコアを正しく入力してください'); return; }
+  const btn = document.getElementById('save-profile-btn');
+  btn.disabled=true; btn.textContent='保存中...';
+  try {
+    await updateDoc(doc(db,'users',currentUser.id), { targetScore:target, deadline, comment });
+    currentUser.targetScore=target; currentUser.deadline=deadline; currentUser.comment=comment;
+    document.getElementById('profile-success').style.display='block';
+    setTimeout(()=>document.getElementById('profile-success').style.display='none', 2000);
+  } catch(e) { alert('保存失敗: '+e.message); }
+  finally { btn.disabled=false; btn.textContent='保存する'; }
 };
 </script>
 
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#0d0d14;--bg2:#13131f;--bg3:#1a1a28;
-  --border:rgba(255,255,255,0.07);
+  --bg:#0d0d14;--bg2:#13131f;--bg3:#1c1c2a;
+  --border:rgba(255,255,255,0.08);
   --accent:#c8b4f0;--accent2:#8b6fd4;
-  --text:#e8e8f0;--muted:#7070a0;
+  --text:#dcdcec;--muted:#8080aa;--hint:#5a5a7a;
   --success:#6ee7b7;--danger:#f87171;
-  --font-head:'Syne',sans-serif;--font-body:'Noto Sans JP',sans-serif;
+  --fh:'Syne',sans-serif;--fb:'Noto Sans JP',sans-serif;
 }
-body{background:var(--bg);color:var(--text);font-family:var(--font-body);min-height:100vh;line-height:1.6}
+body{background:var(--bg);color:var(--text);font-family:var(--fb);min-height:100vh;line-height:1.6;font-size:15px}
 
-/* ---- 認証画面 ---- */
-#auth-screen{display:none;min-height:100vh;align-items:center;justify-content:center;padding:2rem;background:radial-gradient(ellipse at 60% 20%,rgba(139,111,212,0.12) 0%,transparent 60%)}
-.auth-card{background:var(--bg2);border:1px solid var(--border);border-radius:20px;padding:2.5rem 2rem;width:100%;max-width:400px}
-.auth-logo{font-family:var(--font-head);font-size:0.95rem;font-weight:800;color:var(--accent);letter-spacing:0.1em;text-transform:uppercase;margin-bottom:1.5rem}
-.auth-title{font-family:var(--font-head);font-size:1.7rem;font-weight:800;margin-bottom:0.25rem}
-.auth-sub{color:var(--muted);font-size:0.85rem;margin-bottom:1.75rem}
-.auth-switch{text-align:center;margin-top:1.25rem;font-size:0.85rem;color:var(--muted)}
+/* ---- 認証 ---- */
+#auth-screen{display:none;min-height:100vh;align-items:center;justify-content:center;padding:1.5rem;
+  background:radial-gradient(ellipse at 60% 20%,rgba(139,111,212,0.1) 0%,transparent 60%)}
+.auth-card{background:var(--bg2);border:1px solid var(--border);border-radius:18px;padding:2.25rem 2rem;width:100%;max-width:390px}
+.auth-logo{font-family:var(--fh);font-size:0.85rem;font-weight:800;color:var(--accent);letter-spacing:0.1em;text-transform:uppercase;margin-bottom:1.25rem}
+.auth-title{font-family:var(--fh);font-size:1.55rem;font-weight:800;margin-bottom:0.2rem;color:var(--text)}
+.auth-sub{color:var(--muted);font-size:0.85rem;margin-bottom:1.5rem}
+.auth-switch{text-align:center;margin-top:1rem;font-size:0.83rem;color:var(--muted)}
 .auth-switch a{color:var(--accent);cursor:pointer;text-decoration:underline}
-.field{margin-bottom:1rem}
-.field label{display:block;font-size:0.78rem;color:var(--muted);margin-bottom:0.35rem;letter-spacing:0.05em}
-.field input{width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:0.7rem 1rem;color:var(--text);font-family:var(--font-body);font-size:0.95rem;outline:none;transition:border-color 0.2s}
+.field{margin-bottom:0.85rem}
+.field label{display:block;font-size:0.8rem;color:var(--muted);margin-bottom:0.3rem;letter-spacing:0.03em}
+.field input{
+  width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:9px;
+  padding:0.65rem 0.9rem;color:var(--text);font-family:var(--fb);font-size:0.95rem;outline:none;
+  transition:border-color 0.2s;
+}
+.field input::placeholder{color:var(--hint);font-size:0.88rem}
 .field input:focus{border-color:var(--accent2)}
-.err-msg{display:none;color:var(--danger);font-size:0.82rem;margin-bottom:0.75rem;padding:0.5rem 0.75rem;background:rgba(248,113,113,0.1);border-radius:6px;border:1px solid rgba(248,113,113,0.2)}
-.btn-primary{width:100%;background:var(--accent);color:#1a0a3a;border:none;border-radius:10px;padding:0.8rem;font-family:var(--font-head);font-size:0.95rem;font-weight:700;cursor:pointer;transition:opacity 0.2s,transform 0.1s;margin-top:0.25rem}
-.btn-primary:hover{opacity:0.9;transform:translateY(-1px)}
-.btn-primary:disabled{opacity:0.5;cursor:not-allowed;transform:none}
+.err-msg{display:none;color:var(--danger);font-size:0.8rem;margin-bottom:0.65rem;
+  padding:0.45rem 0.75rem;background:rgba(248,113,113,0.08);border-radius:6px;border:1px solid rgba(248,113,113,0.18)}
+.btn-p{width:100%;background:var(--accent);color:#140830;border:none;border-radius:9px;
+  padding:0.75rem;font-family:var(--fh);font-size:0.92rem;font-weight:700;cursor:pointer;
+  transition:opacity 0.15s,transform 0.1s;margin-top:0.2rem}
+.btn-p:hover{opacity:0.9;transform:translateY(-1px)}
+.btn-p:active{transform:translateY(0)}
+.btn-p:disabled{opacity:0.45;cursor:not-allowed;transform:none}
 
 /* ---- ヘッダー ---- */
-#app-screen{display:none;max-width:760px;margin:0 auto;padding-bottom:5rem}
-.app-header{padding:1rem 1.25rem;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg);z-index:10}
-.header-logo{font-family:var(--font-head);font-size:0.95rem;font-weight:800;color:var(--accent);letter-spacing:0.06em}
-.header-right{display:flex;align-items:center;gap:0.75rem}
-.header-name{font-size:0.9rem;color:var(--text);cursor:pointer;padding:0.3rem 0.6rem;border-radius:6px;border:1px solid transparent;transition:border-color 0.2s}
+#app-screen{display:none;max-width:760px;margin:0 auto;padding-bottom:4rem}
+.app-header{padding:0.85rem 1.25rem;display:flex;align-items:center;justify-content:space-between;
+  border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg);z-index:10}
+.header-logo{font-family:var(--fh);font-size:0.88rem;font-weight:800;color:var(--accent);letter-spacing:0.06em}
+.header-right{display:flex;align-items:center;gap:0.6rem}
+.header-name{font-size:0.88rem;color:var(--text);cursor:pointer;padding:0.28rem 0.55rem;
+  border-radius:6px;border:1px solid transparent;transition:border-color 0.2s,color 0.2s}
 .header-name:hover{border-color:var(--border);color:var(--accent)}
-.logout-btn{background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:0.3rem 0.7rem;font-size:0.75rem;cursor:pointer;font-family:var(--font-body);transition:border-color 0.2s,color 0.2s}
+.logout-btn{background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;
+  padding:0.28rem 0.65rem;font-size:0.72rem;cursor:pointer;font-family:var(--fb);
+  transition:border-color 0.2s,color 0.2s}
 .logout-btn:hover{border-color:var(--muted);color:var(--text)}
 
 /* ---- タブ ---- */
-.tab-bar{display:flex;padding:0.6rem 1.25rem;gap:0.4rem;border-bottom:1px solid var(--border);background:var(--bg);position:sticky;top:53px;z-index:9}
-.tab-btn{flex:1;background:none;border:1px solid transparent;border-radius:8px;padding:0.5rem 0.25rem;color:var(--muted);font-family:var(--font-body);font-size:0.8rem;cursor:pointer;transition:all 0.2s;text-align:center}
+.tab-bar{display:flex;padding:0.5rem 1.25rem;gap:0.3rem;border-bottom:1px solid var(--border);
+  background:var(--bg);position:sticky;top:47px;z-index:9}
+.tab-btn{flex:1;background:none;border:1px solid transparent;border-radius:7px;
+  padding:0.42rem 0.15rem;color:var(--muted);font-family:var(--fb);font-size:0.76rem;
+  cursor:pointer;transition:all 0.18s;text-align:center;white-space:nowrap}
 .tab-btn:hover{color:var(--text);background:var(--bg3)}
-.tab-btn.active{background:rgba(200,180,240,0.12);border-color:rgba(200,180,240,0.25);color:var(--accent);font-weight:500}
+.tab-btn.active{background:rgba(200,180,240,0.1);border-color:rgba(200,180,240,0.22);color:var(--accent);font-weight:500}
 
 /* ---- コンテンツ共通 ---- */
-.tab-content{padding:1.25rem 1.25rem;display:none}
-.section-title{font-family:var(--font-head);font-size:0.72rem;font-weight:700;color:var(--muted);letter-spacing:0.12em;text-transform:uppercase;margin-bottom:0.85rem}
-.loading,.empty-state{color:var(--muted);font-size:0.9rem;text-align:center;padding:2.5rem 1rem;line-height:1.8}
-.success-msg{display:none;text-align:center;padding:0.75rem;background:rgba(110,231,183,0.1);border:1px solid rgba(110,231,183,0.25);border-radius:8px;color:var(--success);font-size:0.9rem;margin-top:0.75rem}
+.tab-content{padding:1rem 1.25rem;display:none}
+.section-title{font-family:var(--fh);font-size:0.67rem;font-weight:700;color:var(--hint);
+  letter-spacing:0.12em;text-transform:uppercase;margin-bottom:0.7rem}
+.loading,.empty-s{color:var(--muted);font-size:0.88rem;text-align:center;padding:1.75rem 1rem;line-height:1.8}
+.success-msg{display:none;text-align:center;padding:0.6rem;
+  background:rgba(110,231,183,0.07);border:1px solid rgba(110,231,183,0.2);
+  border-radius:8px;color:var(--success);font-size:0.85rem;margin-top:0.6rem}
 
 /* ---- ランキング ---- */
-.rank-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
-@media(max-width:520px){.rank-grid{grid-template-columns:1fr}}
-.rank-panel{background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:1rem 1rem}
-.rank-item{display:flex;align-items:center;gap:0.75rem;padding:0.65rem 0.5rem;border-bottom:1px solid var(--border)}
+.rank-grid{display:grid;grid-template-columns:1fr 1fr;gap:0.8rem}
+@media(max-width:480px){.rank-grid{grid-template-columns:1fr}}
+.rank-panel{background:var(--bg2);border:1px solid var(--border);border-radius:11px;padding:0.8rem}
+.rank-item{display:flex;align-items:center;gap:0.6rem;padding:0.45rem 0.3rem;
+  border-bottom:1px solid rgba(255,255,255,0.04)}
 .rank-item:last-child{border-bottom:none}
-.rank-item.is-me{background:rgba(200,180,240,0.05);border-radius:8px}
-.rank-medal{font-size:1.1rem;width:26px;text-align:center;flex-shrink:0;color:var(--muted);font-family:var(--font-head);font-weight:700}
+.rank-item.is-me{background:rgba(200,180,240,0.05);border-radius:6px;padding-left:0.45rem}
+.rank-medal{width:22px;text-align:center;flex-shrink:0;color:var(--muted);font-family:var(--fh);font-weight:700;font-size:0.8rem}
 .rank-info{flex:1;min-width:0}
-.rank-name{font-size:0.88rem;font-weight:500;margin-bottom:0.25rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.rank-bar-wrap{background:rgba(255,255,255,0.05);border-radius:3px;height:3px;overflow:hidden}
-.rank-bar{height:100%;background:linear-gradient(90deg,var(--accent2),var(--accent));border-radius:3px}
-.score-bar{background:linear-gradient(90deg,#6ee7b7,#38bdf8)}
-.rank-val{font-family:var(--font-head);font-size:1rem;font-weight:700;color:var(--accent);flex-shrink:0}
-.unit{font-size:0.65rem;color:var(--muted);margin-left:1px}
-.score-rank-list{background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:0.5rem 1rem}
-.diff-badge{display:inline-block;padding:1px 5px;border-radius:4px;font-size:0.7rem;margin-left:5px;font-weight:500}
-.diff-badge.pos{background:rgba(110,231,183,0.15);color:var(--success)}
-.diff-badge.neg{background:rgba(248,113,113,0.15);color:var(--danger)}
+.rank-name{font-size:0.83rem;font-weight:500;margin-bottom:0.18rem;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)}
+.rank-bar-wrap{background:rgba(255,255,255,0.05);border-radius:2px;height:3px;overflow:hidden}
+.rank-bar{height:100%;background:linear-gradient(90deg,var(--accent2),var(--accent));border-radius:2px}
+.score-bar{background:linear-gradient(90deg,#38bdf8,#6ee7b7)}
+.rank-val{font-family:var(--fh);font-size:0.92rem;font-weight:700;color:var(--accent);flex-shrink:0}
+.unit{font-size:0.6rem;color:var(--muted);margin-left:1px}
+.score-rank-list{background:var(--bg2);border:1px solid var(--border);border-radius:11px;padding:0.3rem 0.8rem}
+.dbadge{display:inline-block;padding:1px 5px;border-radius:4px;font-size:0.67rem;margin-left:4px;font-weight:500}
+.dbadge.pos{background:rgba(110,231,183,0.12);color:var(--success)}
+.dbadge.neg{background:rgba(248,113,113,0.12);color:var(--danger)}
 
 /* ---- メンバー ---- */
-.member-card{background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:1rem 1.25rem;margin-bottom:0.75rem}
-.member-card.is-me{border-color:rgba(200,180,240,0.3)}
-.member-card-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem}
-.member-card-name{font-size:1rem;font-weight:500}
-.member-join{font-size:0.75rem;color:var(--muted)}
-.member-card-body{display:grid;grid-template-columns:repeat(3,1fr);gap:0.75rem;margin-bottom:0.5rem}
-.member-stat{background:var(--bg3);border-radius:8px;padding:0.6rem 0.75rem}
-.mstat-label{font-size:0.72rem;color:var(--muted);margin-bottom:0.2rem}
-.mstat-val{font-family:var(--font-head);font-size:1rem;font-weight:700;color:var(--text)}
-.mstat-val.pos{color:var(--success)}
-.mstat-val.neg{color:var(--danger)}
-.days-badge{display:inline-block;margin-left:5px;padding:1px 6px;background:rgba(200,180,240,0.15);color:var(--accent);font-size:0.7rem;border-radius:4px}
-.member-comment{font-size:0.85rem;color:var(--muted);padding:0.5rem 0.75rem;background:var(--bg3);border-radius:8px;margin-top:0.5rem}
+.mc{background:var(--bg2);border:1px solid var(--border);border-radius:10px;
+  padding:0.65rem 0.9rem;margin-bottom:0.45rem}
+.mc.is-me{border-color:rgba(200,180,240,0.28)}
+.mc-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem}
+.mc-name{font-size:0.9rem;font-weight:500;color:var(--text)}
+.mc-meta{font-size:0.7rem;color:var(--hint)}
+.mc-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:0.4rem}
+.mc-s{background:var(--bg3);border-radius:6px;padding:0.38rem 0.55rem}
+.msl{font-size:0.67rem;color:var(--muted);margin-bottom:0.1rem}
+.msv{font-family:var(--fh);font-size:0.88rem;font-weight:700;color:var(--text)}
+.msv.pos{color:var(--success)}
+.msv.neg{color:var(--danger)}
+.mc-comment{font-size:0.78rem;color:var(--muted);padding:0.35rem 0.55rem;
+  background:var(--bg3);border-radius:5px;margin-top:0.4rem;font-style:italic}
+.me-badge{display:inline-block;background:rgba(200,180,240,0.18);color:var(--accent);
+  font-size:0.62rem;padding:1px 5px;border-radius:4px;margin-left:4px;vertical-align:middle}
 
-/* ---- 入力 ---- */
-.input-card{background:var(--bg2);border:1px solid var(--border);border-radius:16px;padding:1.5rem}
-.input-date-label{font-size:0.78rem;color:var(--muted);margin-bottom:1.25rem}
-.input-row{margin-bottom:1rem}
-.input-row label{display:block;font-size:0.78rem;color:var(--muted);margin-bottom:0.35rem}
-.input-row input{width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:0.7rem 1rem;color:var(--text);font-family:var(--font-head);font-size:1.3rem;font-weight:700;outline:none;transition:border-color 0.2s}
-.input-row input:focus{border-color:var(--accent2)}
-.input-row input:disabled{opacity:0.5;cursor:not-allowed}
-.summary-row{display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;margin:1rem 0}
-.summary-card{background:var(--bg3);border-radius:10px;padding:0.75rem 1rem}
-.summary-label{font-size:0.72rem;color:var(--muted);margin-bottom:0.2rem}
-.summary-val{font-family:var(--font-head);font-size:1.4rem;font-weight:700;color:var(--accent)}
+/* ---- 入力フォーム共通 ---- */
+.icard{background:var(--bg2);border:1px solid var(--border);border-radius:13px;padding:1.1rem}
+.date-label{font-size:0.75rem;color:var(--muted);margin-bottom:0.9rem}
+.irow{margin-bottom:0.8rem}
+.irow label{display:block;font-size:0.78rem;color:var(--muted);margin-bottom:0.28rem}
+.irow input{
+  width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:8px;
+  padding:0.6rem 0.85rem;color:var(--text);font-family:var(--fb);font-size:0.93rem;
+  outline:none;transition:border-color 0.2s;
+}
+.irow input::placeholder{color:var(--hint);font-size:0.85rem}
+.irow input:focus{border-color:var(--accent2)}
+.irow input.big{font-family:var(--fh);font-size:1.2rem;font-weight:700}
+.irow input.big::placeholder{font-size:0.95rem;font-weight:400;font-family:var(--fb)}
+
+/* ---- 勉強時間入力 ---- */
+.sum-row{display:grid;grid-template-columns:1fr 1fr;gap:0.6rem;margin:0.75rem 0}
+.sum-card{background:var(--bg3);border-radius:8px;padding:0.6rem 0.8rem}
+.sum-label{font-size:0.68rem;color:var(--muted);margin-bottom:0.12rem}
+.sum-val{font-family:var(--fh);font-size:1.25rem;font-weight:700;color:var(--accent)}
 
 /* ---- マイページ ---- */
-.my-header{margin-bottom:1.25rem}
-.my-header h2{font-family:var(--font-head);font-size:1.5rem;font-weight:800}
-.profile-card,.score-card{background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:1.25rem;margin-bottom:1rem}
-.profile-card .section-title,.score-card .section-title{margin-bottom:1rem}
-.stats-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:0.75rem;margin-bottom:1rem}
-.stat-card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:0.9rem 1rem}
-.stat-val{font-family:var(--font-head);font-size:1.4rem;font-weight:800;color:var(--accent)}
+.my-hd{margin-bottom:0.85rem}
+.my-hd h2{font-family:var(--fh);font-size:1.35rem;font-weight:800;color:var(--text)}
+.scard{background:var(--bg2);border:1px solid var(--border);border-radius:11px;padding:1rem;margin-bottom:0.75rem}
+.stats-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:0.6rem;margin-bottom:0.75rem}
+.stat-card{background:var(--bg2);border:1px solid var(--border);border-radius:9px;padding:0.75rem 0.85rem}
+.stat-val{font-family:var(--fh);font-size:1.25rem;font-weight:800;color:var(--accent)}
 .stat-val.pos{color:var(--success)}
 .stat-val.neg{color:var(--danger)}
-.stat-label{font-size:0.72rem;color:var(--muted);margin-top:0.2rem}
-.chart-card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:1.25rem}
-.chart-card canvas{max-height:240px}
-.me-badge{display:inline-block;background:rgba(200,180,240,0.2);color:var(--accent);font-size:0.65rem;padding:1px 5px;border-radius:4px;margin-left:5px;vertical-align:middle}
+.stat-label{font-size:0.68rem;color:var(--muted);margin-top:0.12rem}
+.chart-card{background:var(--bg2);border:1px solid var(--border);border-radius:9px;padding:0.9rem;margin-bottom:0.75rem}
+.chart-card canvas{max-height:210px}
 .pos{color:var(--success)}
 .neg{color:var(--danger)}
 </style>
@@ -607,29 +591,25 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-body);min-hei
 <div id="auth-screen">
   <div class="auth-card">
     <div class="auth-logo">TOEIC勉強コミュニティ</div>
-
-    <!-- ログイン -->
     <div id="auth-login">
       <div class="auth-title">ログイン</div>
       <div class="auth-sub">登録済みの名前とパスワードで入力してください</div>
       <div class="err-msg" id="login-err"></div>
-      <div class="field"><label>名前</label><input type="text" id="login-name" placeholder="例：英語マスター"></div>
-      <div class="field"><label>パスワード（8文字以上の英数字）</label><input type="password" id="login-pw" placeholder="••••••••"></div>
-      <button class="btn-primary" id="login-btn" onclick="login()">ログイン</button>
-      <div class="auth-switch">はじめての方は<a onclick="switchAuthMode('register')">新規登録はこちら</a></div>
+      <div class="field"><label>名前</label><input type="text" id="login-name" placeholder="登録した名前を入力"></div>
+      <div class="field"><label>パスワード</label><input type="password" id="login-pw" placeholder="8文字以上の英数字"></div>
+      <button class="btn-p" id="login-btn" onclick="login()">ログイン</button>
+      <div class="auth-switch">はじめての方は <a onclick="switchAuthMode('register')">新規登録はこちら</a></div>
     </div>
-
-    <!-- 新規登録 -->
     <div id="auth-register" style="display:none">
       <div class="auth-title">新規登録</div>
       <div class="auth-sub">架空の名前で参加できます</div>
       <div class="err-msg" id="reg-err"></div>
-      <div class="field"><label>名前（他の人と重複不可）</label><input type="text" id="reg-name" placeholder="例：英語マスター志望" maxlength="20"></div>
-      <div class="field"><label>パスワード（8文字以上の英数字）</label><input type="password" id="reg-pw" placeholder="例：abc12345"></div>
-      <div class="field"><label>パスワード（確認）</label><input type="password" id="reg-pw2" placeholder="もう一度入力"></div>
-      <div class="field"><label>TOEIC目標スコア</label><input type="number" id="reg-target" placeholder="例：800" min="10" max="990" step="5"></div>
-      <button class="btn-primary" id="reg-btn" onclick="register()">登録する</button>
-      <div class="auth-switch">登録済みの方は<a onclick="switchAuthMode('login')">ログインはこちら</a></div>
+      <div class="field"><label>名前（他の人と重複不可・最大20文字）</label><input type="text" id="reg-name" placeholder="例：英語マスター志望" maxlength="20"></div>
+      <div class="field"><label>パスワード（8文字以上の英数字）</label><input type="password" id="reg-pw" placeholder="例：English8"></div>
+      <div class="field"><label>パスワード（確認）</label><input type="password" id="reg-pw2" placeholder="もう一度入力してください"></div>
+      <div class="field"><label>TOEIC目標スコア</label><input type="number" id="reg-target" placeholder="例：800（10〜990）" min="10" max="990" step="5"></div>
+      <button class="btn-p" id="reg-btn" onclick="register()">登録する</button>
+      <div class="auth-switch">登録済みの方は <a onclick="switchAuthMode('login')">ログインはこちら</a></div>
     </div>
   </div>
 </div>
@@ -645,10 +625,10 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-body);min-hei
   </header>
 
   <nav class="tab-bar">
-    <button class="tab-btn" data-tab="home" onclick="loadTab('home')">ホーム</button>
+    <button class="tab-btn" data-tab="home"    onclick="loadTab('home')">ホーム</button>
     <button class="tab-btn" data-tab="members" onclick="loadTab('members')">メンバー</button>
-    <button class="tab-btn" data-tab="input" onclick="loadTab('input')">入力</button>
-    <button class="tab-btn" data-tab="mypage" onclick="loadTab('mypage')">マイページ</button>
+    <button class="tab-btn" data-tab="input"   onclick="loadTab('input')">勉強時間入力</button>
+    <button class="tab-btn" data-tab="mypage"  onclick="loadTab('mypage')">マイページ</button>
   </nav>
 
   <!-- ホーム -->
@@ -662,60 +642,60 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-body);min-hei
     <div id="members-list"></div>
   </div>
 
-  <!-- 入力 -->
+  <!-- 勉強時間入力 -->
   <div class="tab-content" id="tab-input">
     <div class="section-title">勉強時間の記録</div>
-    <div class="input-card">
-      <div class="input-date-label">記録日：<span id="input-today-label"></span></div>
+    <div class="icard">
+      <div class="date-label">記録日：<span id="input-today-label"></span></div>
       <input type="hidden" id="input-today-doc">
-      <div class="input-row">
+      <div class="irow">
         <label>本日の勉強時間（時間）</label>
-        <input type="number" id="input-hours" placeholder="例：2.5" min="0" max="24" step="0.5">
+        <input type="number" class="big" id="input-hours" placeholder="例：2.5" min="0" max="24" step="0.5">
       </div>
-      <div class="summary-row">
-        <div class="summary-card">
-          <div class="summary-label">今週の合計</div>
-          <div class="summary-val"><span id="display-week">0.0</span><span style="font-size:0.8rem;color:var(--muted)">h</span></div>
+      <div class="sum-row">
+        <div class="sum-card">
+          <div class="sum-label">今週の合計</div>
+          <div class="sum-val"><span id="display-week">0.0</span><span style="font-size:0.76rem;color:var(--muted);margin-left:2px">h</span></div>
         </div>
-        <div class="summary-card">
-          <div class="summary-label">今月の合計</div>
-          <div class="summary-val"><span id="display-month">0.0</span><span style="font-size:0.8rem;color:var(--muted)">h</span></div>
+        <div class="sum-card">
+          <div class="sum-label">今月の合計</div>
+          <div class="sum-val"><span id="display-month">0.0</span><span style="font-size:0.76rem;color:var(--muted);margin-left:2px">h</span></div>
         </div>
       </div>
-      <button class="btn-primary" id="submit-btn" onclick="submitRecord()">記録する</button>
-      <div class="success-msg" id="input-success">記録しました！</div>
+      <button class="btn-p" id="submit-btn" onclick="submitRecord()">記録する</button>
+      <div class="success-msg" id="input-success">記録しました！ランキングに反映されます。</div>
     </div>
   </div>
 
   <!-- マイページ -->
   <div class="tab-content" id="tab-mypage">
-    <div class="my-header"><h2 id="my-name-disp"></h2></div>
+    <div class="my-hd"><h2 id="my-name-disp"></h2></div>
 
-    <!-- スコア入力 -->
-    <div class="score-card">
+    <!-- スコア記録 -->
+    <div class="scard">
       <div class="section-title">TOEICスコアを記録</div>
       <input type="hidden" id="score-doc-id">
-      <div class="input-row">
-        <label>今日のTOEICスコア（または模試スコア）</label>
-        <input type="number" id="my-score-input" placeholder="例：750" min="10" max="990">
+      <div class="irow">
+        <label>今日のTOEICスコア（模試・本番）</label>
+        <input type="number" class="big" id="my-score-input" placeholder="例：750（10〜990）" min="10" max="990">
       </div>
-      <button class="btn-primary" id="save-score-btn" onclick="saveScore()">スコアを記録</button>
+      <button class="btn-p" id="save-score-btn" onclick="saveScore()">スコアを記録</button>
       <div class="success-msg" id="score-success">スコアを記録しました！</div>
     </div>
 
-    <!-- スコア推移 -->
+    <!-- スコア統計・グラフ -->
     <div class="stats-grid" id="my-stats"></div>
-    <div class="chart-card" id="my-chart-wrap">
+    <div class="chart-card" id="my-chart-wrap" style="display:none">
       <canvas id="my-chart"></canvas>
     </div>
 
     <!-- プロフィール編集 -->
-    <div class="profile-card" style="margin-top:1rem">
+    <div class="scard">
       <div class="section-title">プロフィール編集</div>
-      <div class="input-row"><label>TOEIC目標スコア</label><input type="number" id="my-target-input" min="10" max="990" step="5"></div>
-      <div class="input-row"><label>達成期限</label><input type="date" id="my-deadline-input"></div>
-      <div class="input-row"><label>コメント（一言・意気込みなど）</label><input type="text" id="my-comment-input" placeholder="例：3ヶ月で800点目指す！" maxlength="60"></div>
-      <button class="btn-primary" id="save-profile-btn" onclick="saveProfile()">保存する</button>
+      <div class="irow"><label>TOEIC目標スコア</label><input type="number" id="my-target-input" placeholder="例：800" min="10" max="990" step="5"></div>
+      <div class="irow"><label>達成期限</label><input type="date" id="my-deadline-input"></div>
+      <div class="irow"><label>コメント（一言・意気込みなど）</label><input type="text" id="my-comment-input" placeholder="例：3ヶ月で800点目指す！" maxlength="60"></div>
+      <button class="btn-p" id="save-profile-btn" onclick="saveProfile()">保存する</button>
       <div class="success-msg" id="profile-success">保存しました！</div>
     </div>
   </div>
